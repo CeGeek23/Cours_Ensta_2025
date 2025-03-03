@@ -63,3 +63,11 @@ Decomposition de domaine: La zone de cellules fantôme doit être la plus petite
 La valeur d'une cellule depend de ses 4 voisins
 grille fantome = 402*600 gauche
 grille fantome = 402*600 droite
+
+
+1.1- P0 : Affichage / P1: calcul
+1.2- Affichage / calcule N générations
+
+2- P0 affiche, P1 et P2 calculent
+3- DD + AC (dépendance dédoublée + affichage calcul)
+4- Asynchrone affiche

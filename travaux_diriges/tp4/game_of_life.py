@@ -23,6 +23,7 @@ On itère ensuite pour étudier la façon dont évolue la population des cellule
 """
 import pygame  as pg
 import numpy   as np
+from mpi4py import MPI
 
 
 class Grille:
@@ -59,7 +60,6 @@ class Grille:
         diff_cells = (next_cells != self.cells)
         self.cells = next_cells
         return diff_cells
-
 
 class App:
     """
@@ -99,8 +99,14 @@ class App:
 if __name__ == '__main__':
     import time
     import sys
+    
+    comm = MPI.COMM_WORLD # comm est l'objet qui permet de communiquer entre les processus
+     
+    rank = comm.Get_rank() # rank est le numéro du processus courant, entre 0 et size-1, 0 étant le processus principal
+    size = comm.Get_size() # size étant le nombre de processus(ici 2)
+    
+    N_GENERATIONS = 100  # Nombre de générations à calculer par cycle
 
-    pg.init()
     dico_patterns = { # Dimension et pattern dans un tuple
         'blinker' : ((5,5),[(2,1),(2,2),(2,3)]),
         'toad'    : ((6,6),[(2,2),(2,3),(2,4),(3,3),(3,4),(3,5)]),
@@ -117,7 +123,7 @@ if __name__ == '__main__':
         "u" : ((200,200), [(101,101),(102,102),(103,102),(103,101),(104,103),(105,103),(105,102),(105,101),(105,105),(103,105),(102,105),(101,105),(101,104)]),
         "flat" : ((200,400), [(80,200),(81,200),(82,200),(83,200),(84,200),(85,200),(86,200),(87,200), (89,200),(90,200),(91,200),(92,200),(93,200),(97,200),(98,200),(99,200),(106,200),(107,200),(108,200),(109,200),(110,200),(111,200),(112,200),(114,200),(115,200),(116,200),(117,200),(118,200)])
     }
-    choice = 'glider'
+    choice = 'glider_gun'
     if len(sys.argv) > 1 :
         choice = sys.argv[1]
     resx = 800
@@ -133,19 +139,44 @@ if __name__ == '__main__':
         print("No such pattern. Available ones are:", dico_patterns.keys())
         exit(1)
     grid = Grille(*init_pattern)
-    appli = App((resx, resy), grid)
 
+if rank == 0:  # Processus d'affichage
+        pg.init()
+        grid = Grille(*init_pattern)
+        appli = App((resx, resy), grid)
+
+        loop = True
+        while loop:        
+            # Envoi de la grille actuelle au processus de calcul
+            comm.Send(appli.grid.cells, dest=1, tag=11)
+            
+            # Réception de N générations calculées
+            for _ in range(N_GENERATIONS):
+                comm.Recv(appli.grid.cells, source=1, tag=12)
+                t2 = time.time()
+                appli.draw()
+                t3 = time.time()
+                print(f"Temps affichage : {t3-t2:2.2e} secondes", flush=True)
+
+            # Gestion des événements
+            for event in pg.event.get():
+                if event.type == pg.QUIT:
+                    loop = False
+                    comm.Abort()
+                    print()
+
+else: # Processus de calcul
     loop = True
     while loop:
-        #time.sleep(0.1) # A régler ou commenter pour vitesse maxi
+        # Réception de la grille initiale
+        comm.Recv(grid.cells, source=0, tag=11)
+        
+        # Calcul de N générations
         t1 = time.time()
-        diff = grid.compute_next_iteration()
+        for _ in range(N_GENERATIONS):
+            grid.compute_next_iteration()
+            # Envoi de chaque génération calculée
+            comm.Send(grid.cells, dest=0, tag=12)
         t2 = time.time()
-        appli.draw()
-        t3 = time.time()
-        for event in pg.event.get():
-            if event.type == pg.QUIT:
-                loop = False
-        print(f"Temps calcul prochaine generation : {t2-t1:2.2e} secondes, temps affichage : {t3-t2:2.2e} secondes\r", end='')
-
-pg.quit()
+        
+        print(f"Temps calcul {N_GENERATIONS} générations : {t2-t1:2.2e} secondes", flush=True)
