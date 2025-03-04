@@ -21,8 +21,16 @@ et inversement.
 
 On itère ensuite pour étudier la façon dont évolue la population des cellules sur la grille.
 """
-import pygame  as pg
-import numpy   as np
+import pygame as pg
+import numpy as np
+from mpi4py import MPI
+
+globCom = MPI.COMM_WORLD.Dup()
+rank = globCom.Get_rank()
+nbp = globCom.Get_size()
+
+newCom = globCom.Split(rank != 0, rank)
+print(f"rang global : {rank}, rang local : {newCom.Get_rank()}, nb de processus locaux : {newCom.Get_size()}")
 
 
 class Grille:
@@ -37,14 +45,19 @@ class Grille:
     Exemple :
        grid = Grille( (10,10), init_pattern=[(2,2),(0,2),(4,2),(2,0),(2,4)], color_life=pg.Color("red"), color_dead=pg.Color("black"))
     """
-    def __init__(self, dim, init_pattern=None, color_life=pg.Color("black"), color_dead=pg.Color("white")):
+    def __init__(self, rank: int, nbp: int, dim, init_pattern=None, color_life=pg.Color("black"), color_dead=pg.Color("white")):
         import random
         self.dimensions = dim
+        self.dimensions_loc = (dim[0]//nbp + (1 if rank < dim[0]%nbp else 0), dim[1])
+        self.start_loc = rank * self.dimensions_loc[0] + (dim[0]%nbp if rank >= dim[0]%nbp else 0)
+
         if init_pattern is not None:
-            self.cells = np.zeros(self.dimensions, dtype=np.uint8)
-            indices_i = [v[0] for v in init_pattern]
+            self.cells = np.zeros((self.dimensions_loc[0]+2, self.dimensions_loc[1]), dtype=np.uint8)
+            indices_i = [v[0]-self.start_loc+1 for v in init_pattern 
+                         if v[0] >= self.start_loc and v[0] < self.start_loc+self.dimensions_loc[0]]
             indices_j = [v[1] for v in init_pattern]
-            self.cells[indices_i,indices_j] = 1
+            if len(indices_i) > 0:
+                self.cells[indices_i,indices_j] = 1
         else:
             self.cells = np.random.randint(2, size=dim, dtype=np.uint8)
         self.col_life = color_life
@@ -54,12 +67,26 @@ class Grille:
         """
         Calcule la prochaine génération de cellules en suivant les règles du jeu de la vie
         """
-        neighbours_count = sum(np.roll(np.roll(self.cells, i, 0), j, 1) for i in (-1, 0, 1) for j in (-1, 0, 1) if (i != 0 or j != 0))  
+        neighbours_count = sum(np.roll(np.roll(self.cells, i, 0), j, 1) 
+                             for i in (-1, 0, 1) 
+                             for j in (-1, 0, 1) 
+                             if (i != 0 or j != 0))
         next_cells = (neighbours_count == 3) | (self.cells & (neighbours_count == 2))
         diff_cells = (next_cells != self.cells)
         self.cells = next_cells
         return diff_cells
 
+    def update_ghost_cells(self):
+        """
+        Met à jour les cellules fantômes
+        """
+        # Pour cette question, on a préféré faire une version synchrone : on envoie d'abord, puis on reçoit
+        # à contrario de celle proposée dans game_of_life_parallel.py
+        newCom.Send(self.cells[-2,:], dest=(newCom.rank+1)%newCom.size, tag=102)
+        newCom.Send(self.cells[1,:], dest=(newCom.rank+newCom.size-1)%newCom.size, tag=101)
+        
+        newCom.Recv(self.cells[-1,:], source=(newCom.rank+1)%newCom.size, tag=101)
+        newCom.Recv(self.cells[0,:], source=(newCom.rank+newCom.size-1)%newCom.size, tag=102)
 
 class App:
     """
@@ -72,13 +99,13 @@ class App:
         # Calcul de la taille d'une cellule par rapport à la taille de la fenêtre et de la grille à afficher :
         self.size_x = geometry[1]//grid.dimensions[1]
         self.size_y = geometry[0]//grid.dimensions[0]
-        if self.size_x > 4 and self.size_y > 4 :
-            self.draw_color=pg.Color('lightgrey')
+        if self.size_x > 4 and self.size_y > 4:
+            self.draw_color = pg.Color('lightgrey')
         else:
-            self.draw_color=None
+            self.draw_color = None
         # Ajustement de la taille de la fenêtre pour bien fitter la dimension de la grille
         self.width = grid.dimensions[1] * self.size_x
-        self.height= grid.dimensions[0] * self.size_y
+        self.height = grid.dimensions[0] * self.size_y
         # Création de la fenêtre à l'aide de tkinter
         self.screen = pg.display.set_mode((self.width,self.height))
         #
@@ -86,7 +113,7 @@ class App:
         self.colors = np.array([self.grid.col_dead[:-1], self.grid.col_life[:-1]])
 
     def draw(self):
-        surface = pg.surfarray.make_surface(self.colors[self.grid.cells.T])
+        surface = pg.surfarray.make_surface(self.colors[self.grid.cells[1:-1,:].T])
         surface = pg.transform.flip(surface, False, True)
         surface = pg.transform.scale(surface, (self.width, self.height))
         self.screen.blit(surface, (0,0))
@@ -95,12 +122,10 @@ class App:
             [pg.draw.line(self.screen, self.draw_color, (j*self.size_x,0), (j*self.size_x,self.height)) for j in range(self.grid.dimensions[1])]
         pg.display.update()
 
-
 if __name__ == '__main__':
     import time
     import sys
-
-    pg.init()
+    
     dico_patterns = { # Dimension et pattern dans un tuple
         'blinker' : ((5,5),[(2,1),(2,2),(2,3)]),
         'toad'    : ((6,6),[(2,2),(2,3),(2,4),(3,3),(3,4),(3,5)]),
@@ -118,34 +143,70 @@ if __name__ == '__main__':
         "flat" : ((200,400), [(80,200),(81,200),(82,200),(83,200),(84,200),(85,200),(86,200),(87,200), (89,200),(90,200),(91,200),(92,200),(93,200),(97,200),(98,200),(99,200),(106,200),(107,200),(108,200),(109,200),(110,200),(111,200),(112,200),(114,200),(115,200),(116,200),(117,200),(118,200)])
     }
     choice = 'glider'
-    if len(sys.argv) > 1 :
+    if len(sys.argv) > 1:
         choice = sys.argv[1]
     resx = 800
     resy = 800
-    if len(sys.argv) > 3 :
+    if len(sys.argv) > 3:
         resx = int(sys.argv[2])
         resy = int(sys.argv[3])
+        
     print(f"Pattern initial choisi : {choice}")
     print(f"resolution ecran : {resx,resy}")
+
     try:
         init_pattern = dico_patterns[choice]
     except KeyError:
         print("No such pattern. Available ones are:", dico_patterns.keys())
         exit(1)
-    grid = Grille(*init_pattern)
-    appli = App((resx, resy), grid)
 
-    loop = True
-    while loop:
-        #time.sleep(0.1) # A régler ou commenter pour vitesse maxi
-        t1 = time.time()
-        diff = grid.compute_next_iteration()
-        t2 = time.time()
-        appli.draw()
-        t3 = time.time()
-        for event in pg.event.get():
-            if event.type == pg.QUIT:
-                loop = False
-        print(f"Temps calcul prochaine generation : {t2-t1:2.2e} secondes, temps affichage : {t3-t2:2.2e} secondes\r", end='')
+    if rank == 0:
+        pg.init()
+        grid = Grille(0, 1, *init_pattern)
+        appli = App((resx, resy), grid)
+        loop = True
+        while loop:
+            globCom.send(1, dest=1)  # Signal pour continuer
+            grid_glob = globCom.recv(source=1)  # Réception du tableau global
+            appli.grid.cells[1:-1,:] = grid_glob
+            t2 = time.time()
+            appli.draw()
+            t3 = time.time()
+            
+            for event in pg.event.get():
+                if event.type == pg.QUIT:
+                    loop = False
+                    pg.quit()
+                    globCom.send(-1, dest=1)  # Signal pour arrêter
+                    
+            print(f"Temps affichage : {t3-t2:2.2e} secondes", flush=True)
+    else:
+        grid = Grille(newCom.rank, newCom.size, *init_pattern)
+        grid.update_ghost_cells()
+        print(f"rank loc : {newCom.rank}, cells locales : \n{grid.cells.T}")
 
-pg.quit()
+
+        grid_glob = None
+        if newCom.rank == 0:
+            grid_glob = np.zeros(init_pattern[0], dtype=np.uint8)
+        sendcounts = np.array(newCom.gather(grid.cells[1:-1,:].size, root=0))
+
+        loop = True
+        while loop:
+            #time.sleep(0.1) # A régler ou commenter pour vitesse maxi
+            t1 = time.time()
+            diff = grid.compute_next_iteration()
+            grid.update_ghost_cells()
+            t2 = time.time()
+            
+            # Rassemblement synchrone des données
+            newCom.Gatherv(grid.cells[1:-1,:], [grid_glob, sendcounts], root=0)
+            
+            if newCom.rank == 0:
+                signal = globCom.recv(source=0)
+                if signal == -1:
+                    loop = False
+                else:
+                    globCom.send(grid_glob, dest=0)
+                    
+            print(f"Temps calcul prochaine generation : {t2-t1:2.2e} secondes", flush=True)
